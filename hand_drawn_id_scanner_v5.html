@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>ID Scanner</title>
+<style>
+*{box-sizing:border-box}
+html,body{margin:0;min-height:100%;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display",Arial,sans-serif;background:#f5f5f7;color:#111}
+.page{min-height:100dvh;display:none;align-items:center;justify-content:center;padding:22px 16px;text-align:center}
+.page.active{display:flex}
+.card{width:min(520px,100%);background:#fff;border-radius:28px;padding:30px 20px;box-shadow:0 8px 35px rgba(0,0,0,.12)}
+h1{font-size:31px;margin:0 0 8px;font-weight:900}
+.sub{font-size:20px;color:#555;margin:0 0 22px}
+.scan{display:block;background:#111;color:#fff;border-radius:18px;padding:19px;font-size:21px;font-weight:900}
+input{display:none}
+.result{font-size:34px;font-weight:950;line-height:1.15}
+.valid{color:#128a35}.invalid{color:#b00020}
+button{border:0;border-radius:16px;padding:17px 20px;font-size:19px;font-weight:800;background:#e8e8eb;margin-top:20px}
+.spinner{width:46px;height:46px;border:5px solid #ddd;border-top-color:#111;border-radius:50%;margin:0 auto 18px;animation:s .8s linear infinite}
+@keyframes s{to{transform:rotate(360deg)}}
+.status{font-size:18px;color:#555;line-height:1.4}
+.small{font-size:13px;color:#777;line-height:1.4;margin-top:18px}
+.preview{max-width:100%;max-height:34vh;border-radius:14px;margin-top:16px;display:none}
+.error{font-size:13px;color:#777;margin-top:15px;word-break:break-word}
+</style>
+</head>
+<body>
+
+<section id="scan" class="page active">
+ <div class="card">
+  <h1>ID Scanner</h1>
+  <p class="sub">Please Scan ID 👇!</p>
+  <label class="scan" for="camera">📷 Scan ID</label>
+  <input id="camera" type="file" accept="image/*" capture="environment">
+  <p class="small">The barcode must contain 8 numbers in this order:<br><b>3 · 1 · 10 · anything · anything · anything · anything · 0</b></p>
+ </div>
+</section>
+
+<section id="checking" class="page">
+ <div class="card">
+  <div class="spinner"></div>
+  <h1>Checking ID…</h1>
+  <div class="status" id="status">Reading the numbers…</div>
+  <img id="preview" class="preview">
+  <div id="error" class="error"></div>
+ </div>
+</section>
+
+<section id="validPage" class="page">
+ <div class="card">
+  <div class="result valid">ID Valid ✅</div>
+  <p class="sub">The ID follows the required pattern.</p>
+  <button onclick="startAgain()">Scan Another ID</button>
+ </div>
+</section>
+
+<section id="invalidPage" class="page">
+ <div class="card">
+  <div class="result invalid">Invalid ID please leave 🚫</div>
+  <p class="sub">The ID does not follow the required pattern.</p>
+  <button onclick="startAgain()">Scan Another ID</button>
+ </div>
+</section>
+
+<script>
+const $=id=>document.getElementById(id);
+const pages=['scan','checking','validPage','invalidPage'];
+const camera=$('camera');
+
+function show(id){pages.forEach(x=>$(x).classList.remove('active'));$(id).classList.add('active');}
+function startAgain(){camera.value='';$('preview').style.display='none';$('error').textContent='';show('scan');}
+function status(s){$('status').textContent=s}
+function clean(s){
+ return (s||'').toUpperCase()
+ .replace(/O|Q|D/g,'0').replace(/[IL|]/g,'1').replace(/Z/g,'2').replace(/S/g,'5')
+ .replace(/[^0-9]/g,'');
+}
+
+/* The target is eight numeric fields: 3, 1, 10, ?, ?, ?, ?, 0.
+   OCR often returns "3 1 10 7 6 4 9 0", "311076490", or similar.
+*/
+function patternOK(raw){
+ const s=clean(raw);
+ // Normal expected form is 3 1 10 x x x x 0 = 9 digits total.
+ // Accept the exact 9-digit sequence, with 4 variable middle digits.
+ for(let i=0;i<=s.length-9;i++){
+   const d=s.slice(i,i+9);
+   if(d[0]==='3' && d[1]==='1' && d[2]==='1' && d[3]==='0' && d[8]==='0') return true;
+ }
+ return false;
+}
+
+function imageToSmallJpeg(file){
+ return new Promise((resolve,reject)=>{
+  const fr=new FileReader();
+  fr.onerror=()=>reject(new Error('Could not read the photo.'));
+  fr.onload=()=>{
+   const img=new Image();
+   img.onerror=()=>reject(new Error('Could not open the photo.'));
+   img.onload=()=>{
+    const max=1500, scale=Math.min(1,max/img.width);
+    const c=document.createElement('canvas');
+    c.width=Math.round(img.width*scale); c.height=Math.round(img.height*scale);
+    const ctx=c.getContext('2d');
+    ctx.fillStyle='#fff';ctx.fillRect(0,0,c.width,c.height);
+    ctx.drawImage(img,0,0,c.width,c.height);
+    c.toBlob(b=>b?resolve({blob:b,data:fr.result,img}):reject(new Error('Could not prepare photo.')),'image/jpeg',.82);
+   };
+   img.src=fr.result;
+  };
+  fr.readAsDataURL(file);
+ });
+}
+
+/* Crop the upper portion, where your handwritten numbers are, then enlarge it.
+   We also send the full image as a fallback if the crop does not work. */
+function makeCrop(dataUrl, img){
+ return new Promise((resolve)=>{
+  const c=document.createElement('canvas');
+  const cropH=Math.floor(img.height*.52);
+  const scale=Math.min(1.4,1800/img.width);
+  c.width=Math.round(img.width*scale);
+  c.height=Math.round(cropH*scale);
+  const ctx=c.getContext('2d');
+  ctx.fillStyle='#fff';ctx.fillRect(0,0,c.width,c.height);
+  ctx.drawImage(img,0,0,img.width,cropH,0,0,c.width,c.height);
+  c.toBlob(b=>resolve(b),'image/jpeg',.9);
+ });
+}
+
+async function ocrBlob(blob){
+ const fd=new FormData();
+ fd.append('apikey','helloworld');
+ fd.append('language','eng');
+ fd.append('isOverlayRequired','false');
+ fd.append('OCREngine','2');
+ fd.append('scale','true');
+ fd.append('file',blob,'id.jpg');
+ const r=await fetch('https://api.ocr.space/parse/image',{method:'POST',body:fd});
+ if(!r.ok) throw new Error('OCR service returned '+r.status);
+ const j=await r.json();
+ if(j.IsErroredOnProcessing) throw new Error((j.ErrorMessage||['OCR failed']).join(' '));
+ let text='';
+ for(const x of (j.ParsedResults||[])) text+=(x.ParsedText||'')+'\n';
+ return text;
+}
+
+async function process(file){
+ show('checking');
+ status('Preparing the photo…');
+ $('error').textContent='';
+ try{
+  const prepared=await imageToSmallJpeg(file);
+  $('preview').src=prepared.dataUrl || prepared.data;
+  $('preview').style.display='block';
+
+  status('Reading the handwritten numbers…');
+  let text='';
+  try{
+   const crop=await makeCrop(prepared.data,prepared.img);
+   text=await Promise.race([
+     ocrBlob(crop),
+     new Promise((_,rej)=>setTimeout(()=>rej(new Error('OCR timed out')),20000))
+   ]);
+  }catch(e){
+   // Full-image fallback
+   text=await Promise.race([
+    ocrBlob(prepared.blob),
+    new Promise((_,rej)=>setTimeout(()=>rej(new Error('OCR timed out')),20000))
+   ]);
+  }
+
+  if(patternOK(text)){
+    show('validPage');
+  }else{
+    show('invalidPage');
+  }
+ }catch(e){
+  // Never silently return to Scan ID. Any failed/uncertain scan is invalid.
+  $('error').textContent='Could not read the ID automatically. Please take a clearer photo and try again.';
+  setTimeout(()=>show('invalidPage'),700);
+ }
+}
+
+camera.addEventListener('change',()=>{
+ const file=camera.files && camera.files[0];
+ if(file) process(file);
+});
+</script>
+</body>
+</html>
